@@ -52,8 +52,6 @@ Server: node1, Load (No. Partitions): 32.00/33.00
 Server: node6, Load (No. Partitions): 28.00/33.00
 
 ```
-- ![image](https://github.com/user-attachments/assets/d0e1ccfa-60a7-43b8-9da0-5f1c02f813fa)
 
-
-
+## Future Work
 For future improvements,use self-balancing tree structure, such as an AVL tree or a Red-Black tree. Self-balancing trees provide logarithmic time complexity for insertion, deletion, and lookup operations, which would significantly enhance the efficiency of the ring management. This change would allow for more scalable and performant handling of virtual nodes, especially in dynamic environments where virtual nodes are frequently added or removed.
