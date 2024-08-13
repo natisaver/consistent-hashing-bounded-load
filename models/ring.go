@@ -128,3 +128,38 @@ func (r *Ring) AddServers(servers []*Server) {
 
 	r.printMetrics(movedPartitions)
 }
+
+
+// removes a new server to ring
+func (r *Ring) Remove(serverName string) {
+	if val, ok := r.serverList[server]; !ok {
+		// server does not exist
+		return
+	}
+	// remove the virtual nodes in the ring
+	for i := range r.config.VirtualNodeCount {
+		virutalNodeKey := fmt.Sprintf("%s%d", serverName, i)
+		hashedKey := xxhash.Sum64String(virutalNodeKey)
+		// delete virtual node from ring
+		r.deleteVirtualNode(hashedKey)
+		// delete from virtual node map
+		delete(r.virtualNodeMap, hashedKey)
+	}
+	// delete server from the serverlist
+	delete(r.serverList, name)
+	
+	// since server removed
+	// redistribute partitions
+	movedPartitions := r.distributePartitionsAndLoad()
+
+	r.printMetrics(movedPartitions)
+}
+
+func (r *Ring) deleteVirtualNode(val uint64) {
+	for i := 0; i < len(r.sortedRing); i++ {
+		if r.sortedRing[i] == val {
+			r.sortedRing = append(r.sortedRing[:i], r.sortedRing[i+1:]...)
+			break
+		}
+	}
+}
