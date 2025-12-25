@@ -9,45 +9,21 @@ import (
 
 // xxhash for speed, deterministic output, uniform distribution so replicas are spread out evenly
 
-const (
-	DefaultPartitionCount   int = 271
-	DefaultVirtualNodeCount int = 20
-	// If there are 100 partitions and 10 servers, ideally, each server would manage 10 partitions.
-	// Load Factor = 1.0, each server is expected to handle the ideal no. of 10 partitions.
-	// Load Factor = 1.25, each server is allowed to handle up to 25% more partitions than the ideal number.
-	DefaultLoadFactor float64 = 1.25 // margin of imbalance relative to ideal load
-
-)
-
-type Server struct {
-	Name string
-}
-
 type Ring struct {
 	config Config
 
+	// ring
+	sortedRing     []uint64           	// can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
+
 	// virtual nodes
-	sortedRing     []uint64           // can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
-	virtualNodeMap map[uint64]*Server // maps virtual node hash to server
+	virtualNodeMap map[uint64]*Server 	// Maps virtual node hashed key to server instance
 
 	// servers
-	serverList  map[string]*Server // maps server name to server
-	serverLoads map[string]float64 // maps server name to no. of partitions on it
+	serverList  map[string]*Server  	// Maps server name to server instance
+	serverLoads map[string]int      	// Maps server name to number of partitions on it
 
 	// partitions
-	partitions map[int]*Server // maps partition id to server
-
-}
-
-type Config struct {
-	// Keys are distributed among partitions. Prime numbers are good to
-	// distribute keys uniformly. Select a big PartitionCount if you have
-	// too many keys.
-	PartitionCount int
-	// each server is represented multiple times on the ring to distribute load
-	VirtualNodeCount int
-	// Load is used to calculate average load. See the code, the paper and Google's blog post to learn about it.
-	LoadFactor float64
+	partitions map[int]*Server 			// Maps partition ID to server
 }
 
 // initialises a new ring with a starting set of servers
@@ -68,36 +44,12 @@ func NewRing(servers []*Server, config Config) *Ring {
 		serverList:     make(map[string]*Server),
 		virtualNodeMap: make(map[uint64]*Server),
 		sortedRing:     []uint64{},
+		serverLoads:    make(map[string]int),
+		partitions:     make(map[int]*Server),
 	}
 
 	r.AddServers(servers)
 	return r
-}
-
-// adds a new server to ring
-func (r *Ring) Add(server *Server) {
-	// add server to server list
-	r.serverList[server.Name] = server
-	// create virtual nodes on ring for server
-	for i := range r.config.VirtualNodeCount {
-		virutalNodeKey := fmt.Sprintf("%s%d", server.Name, i)
-		hashedKey := xxhash.Sum64String(virutalNodeKey)
-		// map virtual nodes to the server
-		r.virtualNodeMap[hashedKey] = server
-		// add virtual node to ring
-		r.sortedRing = append(r.sortedRing, hashedKey)
-	}
-	// sort the ring
-	// hashkeys in ascending order
-	sort.Slice(r.sortedRing, func(i, j int) bool {
-		return r.sortedRing[i] < r.sortedRing[j]
-	})
-
-	// since server added
-	// redistribute partitions
-	movedPartitions := r.distributePartitionsAndLoad()
-
-	r.printMetrics(movedPartitions)
 }
 
 // adds a list of servers to ring
@@ -106,21 +58,8 @@ func (r *Ring) AddServers(servers []*Server) {
 		// add server to server list
 		r.serverList[s.Name] = s
 		// create virtual nodes on ring for server
-		for i := range r.config.VirtualNodeCount {
-			virutalNodeKey := fmt.Sprintf("%s%d", s.Name, i)
-			hashedKey := xxhash.Sum64String(virutalNodeKey)
-			// map virtual nodes to the server
-			r.virtualNodeMap[hashedKey] = s
-			// add virtual node to ring
-			r.sortedRing = append(r.sortedRing, hashedKey)
-		}
+		r.addServerVirtualNodes(s)
 	}
-
-	// sort the ring
-	// hashkeys in ascending order
-	sort.Slice(r.sortedRing, func(i, j int) bool {
-		return r.sortedRing[i] < r.sortedRing[j]
-	})
 
 	// since servers added
 	// redistribute partitions
@@ -129,25 +68,24 @@ func (r *Ring) AddServers(servers []*Server) {
 	r.printMetrics(movedPartitions)
 }
 
+// adds a single server to the ring
+func (r *Ring) AddServer(s *Server) {
+	r.AddServers([]*Server{s})
+}
 
-// removes a new server to ring
-func (r *Ring) Remove(serverName string) {
-	if val, ok := r.serverList[server]; !ok {
-		// server does not exist
+// removes a server by server name in ring
+func (r *Ring) RemoveServer(serverName string) {
+	if _, ok := r.serverList[serverName]; !ok {
+		// server does not exist in keys
 		return
 	}
-	// remove the virtual nodes in the ring
-	for i := range r.config.VirtualNodeCount {
-		virutalNodeKey := fmt.Sprintf("%s%d", serverName, i)
-		hashedKey := xxhash.Sum64String(virutalNodeKey)
-		// delete virtual node from ring
-		r.deleteVirtualNode(hashedKey)
-		// delete from virtual node map
-		delete(r.virtualNodeMap, hashedKey)
-	}
+
+	// remove all virtual nodes
+	r.deleteServerVirtualNodes(serverName)
+
 	// delete server from the serverlist
-	delete(r.serverList, name)
-	
+	delete(r.serverList, serverName)
+
 	// since server removed
 	// redistribute partitions
 	movedPartitions := r.distributePartitionsAndLoad()
@@ -155,11 +93,54 @@ func (r *Ring) Remove(serverName string) {
 	r.printMetrics(movedPartitions)
 }
 
-func (r *Ring) deleteVirtualNode(val uint64) {
-	for i := 0; i < len(r.sortedRing); i++ {
-		if r.sortedRing[i] == val {
-			r.sortedRing = append(r.sortedRing[:i], r.sortedRing[i+1:]...)
-			break
-		}
+func (r *Ring) addServerVirtualNodes(server *Server) {
+	for i := 0; i < r.config.VirtualNodeCount; i++ {
+		virtualNodeKey := fmt.Sprintf("%s%d", server.Name, i)
+		hashedKey := xxhash.Sum64String(virtualNodeKey)
+		r.insertSorted(hashedKey)
+		r.virtualNodeMap[hashedKey] = server
+		
+	}
+}
+
+// deleteServerVirtualNodes deletes all virtual nodes of a server from the ring
+func (r *Ring) deleteServerVirtualNodes(serverName string) {
+	for i := 0; i < r.config.VirtualNodeCount; i++ {
+		virtualNodeKey := fmt.Sprintf("%s%d", serverName, i)
+		hashedKey := xxhash.Sum64String(virtualNodeKey)
+
+		// delete from sortedRing
+		r.removeSorted(hashedKey)
+
+		// delete from virtual node map
+		delete(r.virtualNodeMap, hashedKey)
+	}
+}
+
+// insert into sorted Ring
+func (r *Ring) insertSorted(hash uint64) {
+	// find idx to insert O(log(N))
+	// slice = [10, 20, 30, 40], hash = 25, returns idx=2
+	idx := sort.Search(len(r.sortedRing), func(i int) bool {
+		return r.sortedRing[i] >= hash
+	})
+	// insert at idx O(N)
+	r.sortedRing = append(r.sortedRing, 0)          // add dummy to extend slice
+	copy(r.sortedRing[idx+1:], r.sortedRing[idx:])  // shift elements frm idx onward by 1
+	r.sortedRing[idx] = hash						// insert hash at idx
+}
+
+// remove from sorted ring
+func (r *Ring) removeSorted(hash uint64) {
+	// O(log(N))
+	idx := sort.Search(len(r.sortedRing), func(i int) bool {
+		return r.sortedRing[i] >= hash
+	})
+	if idx == len(r.sortedRing) {
+		return // not found
+	}
+	// O(N)
+	if r.sortedRing[idx] == hash {
+		r.sortedRing = append(r.sortedRing[:idx], r.sortedRing[idx+1:]...)
 	}
 }
