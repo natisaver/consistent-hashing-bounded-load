@@ -12,17 +12,17 @@ type Ring struct {
 	config Config
 
 	// ring
-	sortedRing     []uint64           	// server virtual node hashes in sorted ring, can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
+	sortedRing     []uint64           	// sorted ring contains all the server virtual node hashes, can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
 
 	// virtual nodes
-	virtualNodeMap map[uint64]*Server 	// Maps virtual node hashed key to server instance
+	virtualNodeMap map[uint64]*Server 	// Maps virtual node hashed key -> server instance
 
 	// servers
-	serverList  map[string]*Server  	// Maps server name to server instance
-	serverLoads map[string]int      	// Maps server name to number of partitions on it
+	serverList  map[string]*Server  	// Maps server name -> server instance
+	serverLoads map[string]int      	// Maps server name -> number of partitions its holding
 
 	// partitions
-	partitions map[int]*Server 			// Maps partition ID to server
+	partitions map[int]*Server 			// Maps partition ID -> server instance its in
 }
 
 // initialises a new ring with a starting set of servers
