@@ -8,125 +8,81 @@ import (
 	"github.com/cespare/xxhash"
 )
 
-func (r *Ring) averageLoad() float64 {
-	if len(r.serverList) == 0 {
-		return 0
-	}
+// main function => redistributePartitions is called whenever servers are added/removed
+// It redistributes partitions among servers while respecting the bounded load constraint
+func (r *Ring) redistributePartitions() int {
+	prevPartitionState := r.copyPreviousPartitions()
 
-	numPartitionsPerServer := float64(r.config.PartitionCount / (len(r.serverList)))
-	avgLoad := numPartitionsPerServer * r.config.LoadFactor
-	return math.Ceil(avgLoad)
-}
+	newServerLoad := make(map[string]float64)        // Tracks how many partitions each server currently has
+	newPartitionState := make(map[int]*Server)       // New assignment of partitions to servers
+	partitionsMoved := 0                             // Counter for partitions that changed servers
+	maxAllowedLoad := r.maxAllowedLoadPerServer()    // Maximum partitions per server allowed
 
-// Main consistent hashing with bounded load algorithm
-func (r *Ring) distributePartitionsAndLoad() int {
-	// Store the previous partition assignments
-	previousPartitions := make(map[int]*Server)
-	for partID, server := range r.partitions {
-		previousPartitions[partID] = server
-	}
-
-	// recalculate each server's loads and the mapping of partition to server
-	serverLoads := make(map[string]float64)
-	partitions := make(map[int]*Server)
-	movedPartitions := 0
-
-	// Iterate over each partition ID
-	// and distribute the partitions into each server
-	for partID := 0; partID < r.config.PartitionCount; partID++ {
-		// hash partition id
-		hashedPtnKey := xxhash.Sum64([]byte{byte(partID)})
-
-		// With the hashed parition key
-		// find the closest virtual node on the ring to assign the partition to
-		virtualNodeIndex := sort.Search(len(r.sortedRing), func(i int) bool {
-			return r.sortedRing[i] >= hashedPtnKey
-		})
-
-		// Apply Consistent Hashing with Bounds
-		// attempt to store partition into server
-		// if server is full, move clockwise to next virtual node
-		avgLoad := r.averageLoad()
-		success := false
-
-		for attempts := 0; attempts < len(r.sortedRing); attempts++ {
-			virtualNode := r.sortedRing[virtualNodeIndex]
-			server := *r.virtualNodeMap[virtualNode]
-
-			// bound is not full
-			// server has capacity for this partition
-			if serverLoads[server.Name]+1 <= avgLoad {
-				// Check if partition is moved
-				if prevServer := previousPartitions[partID]; prevServer != nil && prevServer.Name != server.Name {
-					movedPartitions++
-				}
-				// Assign partition to the server and update the load
-				serverLoads[server.Name]++
-				partitions[partID] = &server
-				// fmt.Printf("Success, assigned partition %d to server %s\n", partID, server.Name)
-				success = true
-				break
-			}
-
-			// bound is full, check next clockwise virtual node
-			virtualNodeIndex = (virtualNodeIndex + 1)
-		}
-
-		// If after all attempts no server could take the partition, print the failure message
-		if !success {
-			fmt.Printf("Failed to redistribute partition %d, all servers are full\n", partID)
-			fmt.Printf("Consider increasing averageLoad or increasing number of servers\n")
+	for partitionID := 0; partitionID < r.config.PartitionCount; partitionID++ {
+		// for each partition, find the next closest server that can take it without exceeding max load
+		server := r.findNextClosestServerForPartition(partitionID, newServerLoad, maxAllowedLoad)
+		// if all servers full, cannot assign partition
+		if server == nil {
+			fmt.Printf("Failed to assign partition %d, all servers are full\n", partitionID)
+			fmt.Printf("Consider increasing maxAllowedLoad or adding more servers\n")
 			break
 		}
+		
+		// if server found for partition
+		// compare with previous assigned server, to see if partition moved
+		if prevServer := prevPartitionState[partitionID]; prevServer != nil && prevServer.Name != server.Name {
+			partitionsMoved++
+		}
 
+		// assign partition to the server and update load of server
+		newPartitionState[partitionID] = server
+		newServerLoad[server.Name]++
 	}
 
-	// Update the partition and load maps in the object
-	r.partitions = partitions
-	r.serverLoads = serverLoads
+	// update ring states
+	r.partitions = newPartitionState
+	r.serverLoads = newServerLoad
 
-	return movedPartitions
+	return partitionsMoved
 }
 
-func (r *Ring) printMetrics(movedPartitions int) {
-	avgLoad := r.averageLoad()
-	totalServers := len(r.serverLoads)
-	min, max, avg := r.getMinMaxAvgLoadMetrics(totalServers)
-
-	fmt.Println("====RESULTS=====")
-	fmt.Printf("Ideal Average Load: %.2f\n", avgLoad)
-	fmt.Printf("Actual Average Load: %.2f\n", avg)
-	fmt.Printf("Min Load: %.2f, Max Load: %.2f\n", min, max)
-	fmt.Println("--------------")
-	fmt.Printf("Total Number of Servers: %d\n", totalServers)
-
-	fmt.Printf("Partitions Redistributed: %d/%d (%.2f%%)\n", movedPartitions, r.config.PartitionCount, (float64(movedPartitions)/float64(r.config.PartitionCount))*100)
-	fmt.Println("--------------")
-	for serverName, load := range r.serverLoads {
-		fmt.Printf("Server: %s, Load (No. Partitions): %.2f/%.2f\n",
-			serverName, load, avgLoad)
+// creates a new map, to store current partition id -> server assignments
+func (r *Ring) copyPreviousPartitions() map[int]*Server {
+	prev := make(map[int]*Server)
+	for k, v := range r.partitions {
+		prev[k] = v
 	}
-	fmt.Println("")
+	return prev
 }
 
-func (r *Ring) getMinMaxAvgLoadMetrics(totalServers int) (float64, float64, float64) {
-	// Calculate the total, min, and max load
-	var totalLoad, minLoad, maxLoad float64
-	if totalServers > 0 {
-		minLoad = r.serverLoads[fmt.Sprintf("node%d", 0)]
-		maxLoad = r.serverLoads[fmt.Sprintf("node%d", 0)]
+//applies consistent hashing + bounded load
+func (r *Ring) findNextClosestServerForPartition(
+	partitionID int,
+	newServerLoad map[string]float64,
+	maxAllowedLoad float64,
+) *Server {
+	// ring is circular, so if the hash is bigger than the largest virtual server hash
+	// should be assigned to first virtual server hash in ring
+	hash := utils.HashPartition(partitionID)
+	serverIdxToAssign := sort.Search(len(r.sortedRing), func(i int) bool {
+		return r.sortedRing[i] >= hash
+	})
+	if serverIdxToAssign == len(r.sortedRing) {
+		serverIdxToAssign = 0
 	}
 
-	for _, load := range r.serverLoads {
-		totalLoad += load
-		if load < minLoad {
-			minLoad = load
+	// check in clockwise order if server can take partition without exceeding max load
+	for i := 0; i < len(r.sortedRing); i++ {
+		virtualNode := r.sortedRing[serverIdxToAssign]
+		server := r.virtualNodeMap[virtualNode]
+		// test if +1 to add this partition, is it within bounds
+		if newServerLoad[server.Name]+1 <= maxAllowedLoad {
+			return server
 		}
-		if load > maxLoad {
-			maxLoad = load
-		}
+		// check next server in ring if cur server full, % as ring is circular
+		serverIdxToAssign = (serverIdxToAssign + 1) % len(r.sortedRing)
 	}
 
-	actualAvgLoad := totalLoad / float64(totalServers)
-	return minLoad, maxLoad, actualAvgLoad
+	// all servers full, cannot assign partition
+	return nil
 }

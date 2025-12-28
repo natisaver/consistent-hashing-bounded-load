@@ -6,6 +6,8 @@ import (
 )
 
 func main() {
+	// main.go -> server.go -> ring.go -> distribute.go
+
 	initservers := []*models.Server{}
 	// start with 8 servers
 	for i := 0; i < 8; i++ {

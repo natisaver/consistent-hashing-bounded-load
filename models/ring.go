@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"sort"
 
+	"natisaver/consistenthashbound/utils"
 	"github.com/cespare/xxhash"
 )
-
-// xxhash for speed, deterministic output, uniform distribution so replicas are spread out evenly
 
 type Ring struct {
 	config Config
 
 	// ring
-	sortedRing     []uint64           	// can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
+	sortedRing     []uint64           	// server virtual node hashes in sorted ring, can improve using self-balancing trees, O(lg(N)) vs O(N) for add/delete
 
 	// virtual nodes
 	virtualNodeMap map[uint64]*Server 	// Maps virtual node hashed key to server instance
@@ -63,7 +62,7 @@ func (r *Ring) AddServers(servers []*Server) {
 
 	// since servers added
 	// redistribute partitions
-	movedPartitions := r.distributePartitionsAndLoad()
+	movedPartitions := r.redistributePartitions()
 
 	r.printMetrics(movedPartitions)
 }
@@ -88,15 +87,14 @@ func (r *Ring) RemoveServer(serverName string) {
 
 	// since server removed
 	// redistribute partitions
-	movedPartitions := r.distributePartitionsAndLoad()
+	movedPartitions := r.redistributePartitions()
 
 	r.printMetrics(movedPartitions)
 }
 
 func (r *Ring) addServerVirtualNodes(server *Server) {
 	for i := 0; i < r.config.VirtualNodeCount; i++ {
-		virtualNodeKey := fmt.Sprintf("%s%d", server.Name, i)
-		hashedKey := xxhash.Sum64String(virtualNodeKey)
+		hashedKey := hashVirtualNode(server.Name, i)
 		r.insertSorted(hashedKey)
 		r.virtualNodeMap[hashedKey] = server
 		
@@ -106,8 +104,7 @@ func (r *Ring) addServerVirtualNodes(server *Server) {
 // deleteServerVirtualNodes deletes all virtual nodes of a server from the ring
 func (r *Ring) deleteServerVirtualNodes(serverName string) {
 	for i := 0; i < r.config.VirtualNodeCount; i++ {
-		virtualNodeKey := fmt.Sprintf("%s%d", serverName, i)
-		hashedKey := xxhash.Sum64String(virtualNodeKey)
+		hashedKey := hashVirtualNode(serverName, i)
 
 		// delete from sortedRing
 		r.removeSorted(hashedKey)
