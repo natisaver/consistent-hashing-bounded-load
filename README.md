@@ -54,4 +54,5 @@ Server: node6, Load (No. Partitions): 28.00/33.00
 ```
 
 ## Future Work
+Currently for sorted ring, contain the virtual server hashes, Insertion/deletion → O(N) ❌ because you have to shift elements
 For future improvements,use self-balancing tree structure, such as an AVL tree or a Red-Black tree. Self-balancing trees provide logarithmic time complexity for insertion, deletion, and lookup operations, which would significantly enhance the efficiency of the ring management. This change would allow for more scalable and performant handling of virtual nodes, especially in dynamic environments where virtual nodes are frequently added or removed.
